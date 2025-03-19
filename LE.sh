@@ -147,45 +147,51 @@ build_services() {
 setup_systemd() {
     echo -e "${ORANGE}[10/10] Настройка сервисов...${NC}"
     
-    # Merkle Service
-    sudo tee /etc/systemd/system/merkle.service >/dev/null <<EOL
-[Unit]
-Description=LayerEdge Merkle Service
-After=network.target
-
-[Service]
-User=$SERVICE_USER
-WorkingDirectory=$INSTALL_DIR/$NODE_DIR/$MERKLE_DIR
-ExecStart=$(which cargo) run --release
-Restart=always
-RestartSec=10s
-
-[Install]
-WantedBy=multi-user.target
-EOL
-
     # Node Service
     sudo tee /etc/systemd/system/layeredge-node.service >/dev/null <<EOL
 [Unit]
 Description=LayerEdge Light Node
-After=merkle.service
+Requires=merkle.service
+After=merkle.service network.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
+Type=simple
 User=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR/$NODE_DIR
-ExecStart=$INSTALL_DIR/$NODE_DIR/layeredge-node
-Restart=always
+ExecStart=/bin/bash -c "$INSTALL_DIR/$NODE_DIR/layeredge-node >> /var/log/layeredge-node.log 2>&1"
+Restart=on-failure
 RestartSec=10s
+TimeoutStartSec=300
+Environment="RUST_LOG=info"
+Environment="GOLOG_LOG_LEVEL=info"
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=layeredge-node
 
 [Install]
 WantedBy=multi-user.target
 EOL
 
+    # Создаем директорию для логов
+    sudo mkdir -p /var/log/layeredge
+    sudo chown $SERVICE_USER:$SERVICE_USER /var/log/layeredge
+
+    # Применяем изменения
     sudo systemctl daemon-reload
-    sudo systemctl enable merkle.service layeredge-node.service
-    sudo systemctl restart merkle.service layeredge-node.service
-    echo -e "${GREEN}Сервисы успешно запущены!${NC}"
-    systemctl status merkle.service layeredge-node.service --no-pager
+    sudo systemctl enable --now merkle.service layeredge-node.service
+    echo -e "${GREEN}Сервисы успешно настроены!${NC}"
+    
+    # Даем время на запуск
+    sleep 5
+    
+    # Проверка статуса
+    systemctl status layeredge-node.service --no-pager || {
+        echo -e "${RED}Ошибка запуска ноды! Смотрите логи:${NC}"
+        tail -n 50 /var/log/layeredge-node.log
+        exit 1
+    }
 }
 
 show_menu() {
