@@ -119,9 +119,28 @@ EOL
 }
 
 build_services() {
-    echo -e "${ORANGE}[8/8] Сборка сервисов...${NC}"
-    cd "$MERKLE_DIR" && cargo build --release
-    cd .. && go build -o layeredge-node
+    echo -e "${ORANGE}[8/9] Сборка сервисов...${NC}"
+    
+    # Обновление зависимостей
+    echo -e "${ORANGE}Обновление Go модулей...${NC}"
+    cd "$INSTALL_DIR/$NODE_DIR"
+    go mod tidy -v
+    
+    # Сборка Merkle
+    echo -e "${ORANGE}Сборка Merkle-сервиса...${NC}"
+    cd "$MERKLE_DIR"
+    cargo build --release || {
+        echo -e "${RED}Ошибка сборки Merkle!${NC}"
+        exit 1
+    }
+    
+    # Сборка Node
+    echo -e "${ORANGE}Сборка Light Node...${NC}"
+    cd ..
+    go build -v -o layeredge-node || {
+        echo -e "${RED}Ошибка сборки Node!${NC}" 
+        exit 1
+    }
 }
 
 setup_systemd() {
