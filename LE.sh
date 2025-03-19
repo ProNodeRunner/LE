@@ -129,69 +129,104 @@ API_REQUEST_TIMEOUT=100
 POINTS_API=http://127.0.0.1:8080
 PRIVATE_KEY='$PRIVATE_KEY'
 EOL
+
+    # Устанавливаем правильные права
+    chmod 600 .env
+    chown $SERVICE_USER:$SERVICE_USER .env
 }
 
 build_services() {
     echo -e "${ORANGE}[9/10] Сборка сервисов...${NC}"
     
-    # Обновление Go модулей
-    ( cd "$INSTALL_DIR/$NODE_DIR" && go mod tidy -v )
+    echo -e "${ORANGE}Обновление Go модулей...${NC}"
+    ( cd "$INSTALL_DIR/$NODE_DIR" && go mod tidy -v ) || {
+        echo -e "${RED}Ошибка обновления зависимостей!${NC}"
+        exit 1
+    }
 
-    # Сборка Merkle
-    ( cd "$MERKLE_DIR" && cargo build --release )
+    echo -e "${ORANGE}Сборка Merkle-сервиса...${NC}"
+    ( cd "$MERKLE_DIR" && cargo build --release ) || {
+        echo -e "${RED}Ошибка сборки Merkle!${NC}"
+        exit 1
+    }
 
-    # Сборка Node
-    ( cd "$INSTALL_DIR/$NODE_DIR" && go build -v -o layeredge-node )
+    echo -e "${ORANGE}Сборка Light Node...${NC}"
+    ( cd "$INSTALL_DIR/$NODE_DIR" && go build -v -o layeredge-node ) || {
+        echo -e "${RED}Ошибка сборки Node!${NC}"
+        exit 1
+    }
 }
 
 setup_systemd() {
     echo -e "${ORANGE}[10/10] Настройка сервисов...${NC}"
     
-    # Node Service
-    sudo tee /etc/systemd/system/layeredge-node.service >/dev/null <<EOL
+    # Конфигурация Merkle Service
+    sudo tee /etc/systemd/system/merkle.service >/dev/null <<EOL
 [Unit]
-Description=LayerEdge Light Node
-Requires=merkle.service
-After=merkle.service network.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
+Description=LayerEdge Merkle Service
+After=network.target
 
 [Service]
-Type=simple
+Type=exec
 User=$SERVICE_USER
-WorkingDirectory=$INSTALL_DIR/$NODE_DIR
-ExecStart=/bin/bash -c "$INSTALL_DIR/$NODE_DIR/layeredge-node >> /var/log/layeredge-node.log 2>&1"
-Restart=on-failure
+WorkingDirectory=$INSTALL_DIR/$NODE_DIR/$MERKLE_DIR
+ExecStart=$(which cargo) run --release
+Restart=always
 RestartSec=10s
-TimeoutStartSec=300
 Environment="RUST_LOG=info"
-Environment="GOLOG_LOG_LEVEL=info"
-StandardOutput=syslog
-StandardError=syslog
-SyslogIdentifier=layeredge-node
 
 [Install]
 WantedBy=multi-user.target
 EOL
 
-    # Создаем директорию для логов
-    sudo mkdir -p /var/log/layeredge
-    sudo chown $SERVICE_USER:$SERVICE_USER /var/log/layeredge
+    # Конфигурация Node Service
+    sudo tee /etc/systemd/system/layeredge-node.service >/dev/null <<EOL
+[Unit]
+Description=LayerEdge Light Node
+Requires=merkle.service
+After=merkle.service
 
-    # Применяем изменения
+[Service]
+Type=exec
+User=$SERVICE_USER
+WorkingDirectory=$INSTALL_DIR/$NODE_DIR
+ExecStart=$INSTALL_DIR/$NODE_DIR/layeredge-node
+EnvironmentFile=$INSTALL_DIR/$NODE_DIR/.env
+Restart=on-failure
+RestartSec=30s
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
+EOL
+
+    # Применение изменений
     sudo systemctl daemon-reload
-    sudo systemctl enable --now merkle.service layeredge-node.service
-    echo -e "${GREEN}Сервисы успешно настроены!${NC}"
+    sudo systemctl enable merkle.service layeredge-node.service
     
-    # Даем время на запуск
-    sleep 5
+    echo -e "${ORANGE}Запуск Merkle-сервиса...${NC}"
+    sudo systemctl start merkle.service
+    
+    echo -e "${ORANGE}Ожидание инициализации Merkle (30 секунд)...${NC}"
+    sleep 30
+    
+    echo -e "${ORANGE}Запуск Light Node...${NC}"
+    sudo systemctl start layeredge-node.service
     
     # Проверка статуса
-    systemctl status layeredge-node.service --no-pager || {
-        echo -e "${RED}Ошибка запуска ноды! Смотрите логи:${NC}"
-        tail -n 50 /var/log/layeredge-node.log
-        exit 1
-    }
+    local retries=5
+    while [ $retries -gt 0 ]; do
+        if systemctl is-active --quiet layeredge-node.service; then
+            echo -e "${GREEN}Сервисы успешно запущены!${NC}"
+            return 0
+        fi
+        sleep 10
+        ((retries--))
+    done
+    
+    echo -e "${RED}Ошибка запуска ноды! Логи:${NC}"
+    journalctl -u layeredge-node.service -n 50 --no-pager
+    exit 1
 }
 
 show_menu() {
