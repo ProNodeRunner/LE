@@ -243,18 +243,20 @@ EOL
     }
 
     echo -e "${ORANGE}Проверка доступности Merkle-сервиса...${NC}"
-    local max_retries=10
+    local max_retries=20
     for ((i=1; i<=max_retries; i++)); do
-        if curl -sSf http://127.0.0.1:3001 >/dev/null; then
+        if curl -sSf http://127.0.0.1:3001/health >/dev/null; then
             echo -e "${GREEN}Merkle-сервис доступен!${NC}"
             break
         else
-            echo -e "${ORANGE}Попытка $i/$max_retries: Сервис не отвечает...${NC}"
-            sleep 15
+            echo -e "${ORANGE}Попытка $i/$max_retries: Ожидание инициализации ZK...${NC}"
+            sleep 30
         fi
         if [ $i -eq $max_retries ]; then
-            echo -e "${RED}Merkle-сервис не запустился!${NC}"
-            journalctl -u merkle.service -n 100 --no-pager
+            echo -e "${RED}Merkle-сервис не запустился! Проверьте:${NC}"
+            echo -e "1. journalctl -u merkle.service -n 100 --no-pager"
+            echo -e "2. netstat -tulpn | grep 3001"
+            echo -e "3. curl -v http://127.0.0.1:3001/health"
             exit 1
         fi
     done
