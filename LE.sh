@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
+# Конфигурация
 LOGO_URL="https://raw.githubusercontent.com/ProNodeRunner/Logo/main/Logo"
 ORANGE='\033[0;33m'
 GREEN='\033[0;32m'
@@ -19,58 +20,119 @@ show_logo() {
     echo -e "${ORANGE}====================== LayerEdge Node ======================${NC}\n"
 }
 
+check_disk_space() {
+    echo -e "${ORANGE}[1/10] Проверка свободного места...${NC}"
+    local required=1000 # Минимум 1GB
+    local available=$(df -m . | awk 'NR==2 {print $4}')
+    
+    if [ "$available" -lt "$required" ]; then
+        echo -e "${RED}ОШИБКА: Недостаточно места! Нужно: ${required}MB, есть: ${available}MB${NC}"
+        exit 1
+    fi
+}
+
 check_dependencies() {
-    echo -e "${ORANGE}[1/9] Обновление системы...${NC}"
+    echo -e "${ORANGE}[2/10] Обновление системы...${NC}"
     sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
     sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -yq
 
-    echo -e "${ORANGE}[2/9] Установка базовых зависимостей...${NC}"
+    echo -e "${ORANGE}[3/10] Установка базовых пакетов...${NC}"
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq \
         git curl build-essential libssl-dev pkg-config tar
+
+    echo -e "${ORANGE}[4/10] Очистка пакетов...${NC}"
+    sudo DEBIAN_FRONTEND=noninteractive apt-get autoremove -yq
 }
 
 install_go() {
-    echo -e "${ORANGE}[3/9] Установка Go 1.23.1...${NC}"
-    sudo rm -rf /usr/local/go
-    local GO_VERSION="1.23.1"
-    curl -OL https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
-    sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
-    rm go${GO_VERSION}.linux-amd64.tar.gz
+    echo -e "${ORANGE}[5/10] Установка Go 1.23.1...${NC}"
+    local TEMP_DIR=$(mktemp -d)
+    chmod 777 "$TEMP_DIR"
+    cd "$TEMP_DIR" || exit 1
+
+    # Удаление старых версий
+    sudo rm -rf /usr/local/go /usr/lib/go-*
+
+    # Скачивание
+    GO_VERSION="1.23.1"
+    ARCH="linux-amd64"
+    if ! curl -OL --fail "https://go.dev/dl/go${GO_VERSION}.${ARCH}.tar.gz"; then
+        echo -e "${RED}ОШИБКА: Не удалось скачать Go!${NC}"
+        exit 1
+    fi
+
+    # Установка
+    sudo tar -C /usr/local -xzf "go${GO_VERSION}.${ARCH}.tar.gz" || {
+        echo -e "${RED}ОШИБКА: Не удалось распаковать Go!${NC}"
+        exit 1
+    }
+
+    # Настройка окружения
     echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go_custom.sh
     source /etc/profile.d/go_custom.sh
+
+    # Проверка
+    if ! go version | grep -q "go$GO_VERSION"; then
+        echo -e "${RED}ОШИБКА: Неправильная версия Go!${NC}"
+        exit 1
+    fi
+
+    # Очистка
+    rm -f "go${GO_VERSION}.${ARCH}.tar.gz"
+    cd - >/dev/null || exit 1
 }
 
 install_rust() {
-    echo -e "${ORANGE}[4/9] Установка Rust...${NC}"
+    echo -e "${ORANGE}[6/10] Установка Rust...${NC}"
     sudo apt-get remove -yq rustc cargo 2>/dev/null || true
     rm -rf ~/.cargo ~/.rustup
+
     export RUSTUP_INIT_SKIP_PATH_CHECK=yes
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
+
+    # Установка версии
     rustup install 1.81.0
     rustup default 1.81.0
+
+    # Проверка
+    if ! cargo --version | grep -q "1.81.0"; then
+        echo -e "${RED}ОШИБКА: Неправильная версия Rust!${NC}"
+        exit 1
+    fi
 }
 
 install_risc0() {
-    echo -e "${ORANGE}[5/9] Установка Risc0...${NC}"
+    echo -e "${ORANGE}[7/10] Установка Risc0...${NC}"
     curl -L https://risczero.com/install | bash
     source "$HOME/.cargo/env"
     export PATH="$HOME/.risc0/bin:$PATH"
     rzup install --force
+
+    if ! rzup --version; then
+        echo -e "${RED}ОШИБКА: Не удалось установить Risc0!${NC}"
+        exit 1
+    fi
 }
 
 setup_project() {
-    echo -e "${ORANGE}[6/9] Клонирование репозитория...${NC}"
+    echo -e "${ORANGE}[8/10] Настройка проекта...${NC}"
     [ ! -d "$NODE_DIR" ] && git clone https://github.com/Layer-Edge/light-node.git
     cd "$NODE_DIR" || exit 1
 
-    echo -e "${ORANGE}[7/9] Настройка окружения...${NC}"
     read -p "${ORANGE}Введите приватный ключ кошелька: ${NC}" PRIVATE_KEY
-    sed -i "s|PRIVATE_KEY='.*'|PRIVATE_KEY='$PRIVATE_KEY'|" .env
+    cat > .env <<EOL
+GRPC_URL=34.31.74.109:9090
+CONTRACT_ADDR=cosmos1ufs3tlq4umljk0qfe8k5ya0x6hpavn897u2cnf9k0en9jr7qarqqt56709
+ZK_PROVER_URL=http://127.0.0.1:3001
+API_REQUEST_TIMEOUT=100
+POINTS_API=http://127.0.0.1:8080
+PRIVATE_KEY='$PRIVATE_KEY'
+EOL
 }
 
 build_services() {
-    echo -e "${ORANGE}[8/9] Сборка сервисов...${NC}"
+    echo -e "${ORANGE}[9/10] Сборка сервисов...${NC}"
     
     # Обновление Go модулей
     ( cd "$INSTALL_DIR/$NODE_DIR" && go mod tidy -v )
@@ -83,7 +145,7 @@ build_services() {
 }
 
 setup_systemd() {
-    echo -e "${ORANGE}[9/9] Настройка systemd...${NC}"
+    echo -e "${ORANGE}[10/10] Настройка сервисов...${NC}"
     
     # Merkle Service
     sudo tee /etc/systemd/system/merkle.service >/dev/null <<EOL
@@ -122,7 +184,7 @@ EOL
     sudo systemctl daemon-reload
     sudo systemctl enable merkle.service layeredge-node.service
     sudo systemctl restart merkle.service layeredge-node.service
-    sleep 5
+    echo -e "${GREEN}Сервисы успешно запущены!${NC}"
     systemctl status merkle.service layeredge-node.service --no-pager
 }
 
@@ -135,6 +197,15 @@ show_menu() {
     echo -e "6. Выход${NC}"
 }
 
+delete_node() {
+    echo -e "${RED}Удаление ноды...${NC}"
+    sudo systemctl stop merkle.service layeredge-node.service
+    sudo systemctl disable merkle.service layeredge-node.service
+    sudo rm -f /etc/systemd/system/{merkle,layeredge-node}.service
+    sudo rm -rf "$INSTALL_DIR/$NODE_DIR"
+    echo -e "${GREEN}Нода успешно удалена!${NC}"
+}
+
 main() {
     while true; do
         show_logo
@@ -143,6 +214,7 @@ main() {
 
         case $choice in
             1)
+                check_disk_space
                 check_dependencies
                 install_go
                 install_rust
@@ -152,17 +224,12 @@ main() {
                 setup_systemd
                 ;;
             2) systemctl status merkle.service layeredge-node.service --no-pager ;;
-            3) 
+            3)
                 journalctl -u merkle.service -n 20 --no-pager
                 journalctl -u layeredge-node.service -n 20 --no-pager
                 ;;
             4) sudo systemctl restart merkle.service layeredge-node.service ;;
-            5)
-                sudo systemctl stop merkle.service layeredge-node.service
-                sudo systemctl disable merkle.service layeredge-node.service
-                sudo rm -f /etc/systemd/system/{merkle,layeredge-node}.service
-                sudo rm -rf "$INSTALL_DIR/$NODE_DIR"
-                ;;
+            5) delete_node ;;
             6) exit 0 ;;
             *) echo -e "${RED}Неверный выбор!${NC}" ;;
         esac
