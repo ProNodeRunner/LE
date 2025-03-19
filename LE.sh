@@ -117,50 +117,75 @@ install_risc0() {
 
 setup_project() {
     echo -e "${ORANGE}[8/10] Настройка проекта...${NC}"
-    [ ! -d "$NODE_DIR" ] && git clone https://github.com/Layer-Edge/light-node.git
+    
+    # Клонирование репозитория с проверкой
+    if [ ! -d "$NODE_DIR" ]; then
+        git clone https://github.com/Layer-Edge/light-node.git || {
+            echo -e "${RED}Ошибка клонирования репозитория!${NC}"
+            exit 1
+        }
+    fi
+
     cd "$NODE_DIR" || exit 1
 
-    read -p "${ORANGE}Введите приватный ключ кошелька: ${NC}" PRIVATE_KEY
+    # Ввод приватного ключа с валидацией
+    while :; do
+        read -p "${ORANGE}Введите приватный ключ кошелька (формат 0x...): ${NC}" PRIVATE_KEY
+        if [[ "$PRIVATE_KEY" =~ ^0x[a-fA-F0-9]{64}$ ]]; then
+            break
+        else
+            echo -e "${RED}Неверный формат ключа! Должно быть 64 hex-символа после 0x${NC}"
+        fi
+    done
+
+    # Создание .env файла без кавычек
     cat > .env <<EOL
 GRPC_URL=34.31.74.109:9090
 CONTRACT_ADDR=cosmos1ufs3tlq4umljk0qfe8k5ya0x6hpavn897u2cnf9k0en9jr7qarqqt56709
 ZK_PROVER_URL=http://127.0.0.1:3001
 API_REQUEST_TIMEOUT=100
 POINTS_API=http://127.0.0.1:8080
-PRIVATE_KEY='$PRIVATE_KEY'
+PRIVATE_KEY=$PRIVATE_KEY
 EOL
 
-    # Устанавливаем правильные права
+    # Установка строгих прав
     chmod 600 .env
-    chown $SERVICE_USER:$SERVICE_USER .env
+    chown "${SERVICE_USER}:${SERVICE_USER}" .env || {
+        echo -e "${RED}Ошибка установки прав на .env файл!${NC}"
+        exit 1
+    }
 }
 
 build_services() {
     echo -e "${ORANGE}[9/10] Сборка сервисов...${NC}"
     
-    echo -e "${ORANGE}Обновление Go модулей...${NC}"
-    ( cd "$INSTALL_DIR/$NODE_DIR" && go mod tidy -v ) || {
-        echo -e "${RED}Ошибка обновления зависимостей!${NC}"
+    # Обновление Go модулей
+    echo -e "${ORANGE}Обновление зависимостей Go...${NC}"
+    if ! (cd "$INSTALL_DIR/$NODE_DIR" && go mod tidy -v); then
+        echo -e "${RED}Ошибка обновления Go модулей!${NC}"
         exit 1
-    }
+    fi
 
-    echo -e "${ORANGE}Сборка Merkle-сервиса...${NC}"
-    ( cd "$MERKLE_DIR" && cargo build --release ) || {
-        echo -e "${RED}Ошибка сборки Merkle!${NC}"
+    # Сборка Merkle-сервиса
+    echo -e "${ORANGE}Компиляция Merkle-сервиса...${NC}"
+    if ! (cd "$MERKLE_DIR" && cargo build --release); then
+        echo -e "${RED}Ошибка сборки Merkle-сервиса!${NC}"
         exit 1
-    }
+    fi
 
-    echo -e "${ORANGE}Сборка Light Node...${NC}"
-    ( cd "$INSTALL_DIR/$NODE_DIR" && go build -v -o layeredge-node ) || {
-        echo -e "${RED}Ошибка сборки Node!${NC}"
+    # Сборка ноды
+    echo -e "${ORANGE}Компиляция Light Node...${NC}"
+    if ! (cd "$INSTALL_DIR/$NODE_DIR" && go build -v -o layeredge-node); then
+        echo -e "${RED}Ошибка сборки Light Node!${NC}"
         exit 1
-    }
+    fi
 }
 
 setup_systemd() {
     echo -e "${ORANGE}[10/10] Настройка сервисов...${NC}"
     
     # Конфигурация Merkle Service
+    echo -e "${ORANGE}Создание сервиса Merkle...${NC}"
     sudo tee /etc/systemd/system/merkle.service >/dev/null <<EOL
 [Unit]
 Description=LayerEdge Merkle Service
@@ -171,7 +196,7 @@ Type=exec
 User=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR/$NODE_DIR/$MERKLE_DIR
 ExecStart=$(which cargo) run --release
-Restart=always
+Restart=on-failure
 RestartSec=10s
 Environment="RUST_LOG=info"
 
@@ -180,6 +205,7 @@ WantedBy=multi-user.target
 EOL
 
     # Конфигурация Node Service
+    echo -e "${ORANGE}Создание сервиса Light Node...${NC}"
     sudo tee /etc/systemd/system/layeredge-node.service >/dev/null <<EOL
 [Unit]
 Description=LayerEdge Light Node
@@ -194,7 +220,12 @@ ExecStart=$INSTALL_DIR/$NODE_DIR/layeredge-node
 EnvironmentFile=$INSTALL_DIR/$NODE_DIR/.env
 Restart=on-failure
 RestartSec=30s
-TimeoutStartSec=300
+TimeoutStartSec=600
+
+# Логирование
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=layeredge-node
 
 [Install]
 WantedBy=multi-user.target
@@ -202,31 +233,49 @@ EOL
 
     # Применение изменений
     sudo systemctl daemon-reload
-    sudo systemctl enable merkle.service layeredge-node.service
-    
+
+    # Запуск сервисов с проверками
     echo -e "${ORANGE}Запуск Merkle-сервиса...${NC}"
-    sudo systemctl start merkle.service
-    
-    echo -e "${ORANGE}Ожидание инициализации Merkle (30 секунд)...${NC}"
-    sleep 30
-    
-    echo -e "${ORANGE}Запуск Light Node...${NC}"
-    sudo systemctl start layeredge-node.service
-    
-    # Проверка статуса
-    local retries=5
-    while [ $retries -gt 0 ]; do
-        if systemctl is-active --quiet layeredge-node.service; then
-            echo -e "${GREEN}Сервисы успешно запущены!${NC}"
-            return 0
+    sudo systemctl enable --now merkle.service || {
+        echo -e "${RED}Ошибка запуска Merkle-сервиса!${NC}"
+        journalctl -u merkle.service -n 50 --no-pager
+        exit 1
+    }
+
+    echo -e "${ORANGE}Проверка доступности Merkle-сервиса...${NC}"
+    local max_retries=10
+    for ((i=1; i<=max_retries; i++)); do
+        if curl -sSf http://127.0.0.1:3001 >/dev/null; then
+            echo -e "${GREEN}Merkle-сервис доступен!${NC}"
+            break
+        else
+            echo -e "${ORANGE}Попытка $i/$max_retries: Сервис не отвечает...${NC}"
+            sleep 15
         fi
-        sleep 10
-        ((retries--))
+        if [ $i -eq $max_retries ]; then
+            echo -e "${RED}Merkle-сервис не запустился!${NC}"
+            journalctl -u merkle.service -n 100 --no-pager
+            exit 1
+        fi
     done
-    
-    echo -e "${RED}Ошибка запуска ноды! Логи:${NC}"
-    journalctl -u layeredge-node.service -n 50 --no-pager
-    exit 1
+
+    echo -e "${ORANGE}Запуск Light Node...${NC}"
+    sudo systemctl enable --now layeredge-node.service || {
+        echo -e "${RED}Ошибка запуска Light Node!${NC}"
+        journalctl -u layeredge-node.service -n 50 --no-pager
+        exit 1
+    }
+
+    # Финальная проверка
+    echo -e "${ORANGE}Проверка статуса ноды...${NC}"
+    if systemctl is-active --quiet layeredge-node.service; then
+        echo -e "${GREEN}Нода успешно запущена!${NC}"
+        echo -e "${ORANGE}Для просмотра логов используйте: journalctl -u layeredge-node.service -f${NC}"
+    else
+        echo -e "${RED}Нода не запустилась! Последние логи:${NC}"
+        journalctl -u layeredge-node.service -n 50 --no-pager
+        exit 1
+    fi
 }
 
 show_menu() {
