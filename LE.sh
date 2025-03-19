@@ -47,9 +47,31 @@ install_go() {
 
 install_rust() {
     echo -e "${ORANGE}[4/8] Установка Rust...${NC}"
+    
+    # Принудительное удаление системных версий Rust
+    if dpkg -l | grep -q 'rustc\|cargo'; then
+        echo -e "${ORANGE}Удаление системных версий Rust...${NC}"
+        sudo apt-get remove -yq rustc cargo
+    fi
+
+    # Чистая установка через rustup
+    export RUSTUP_INIT_SKIP_PATH_CHECK=yes
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+    
+    # Обновление переменных окружения
     source "$HOME/.cargo/env"
-    rustup default 1.81.0 -y
+    export PATH="$HOME/.cargo/bin:$PATH"
+
+    # Установка конкретной версии
+    echo -e "${ORANGE}Установка Rust 1.81.0...${NC}"
+    rustup install 1.81.0 -y
+    rustup default 1.81.0
+    
+    # Проверка установки
+    if ! cargo --version | grep -q '1.81.0'; then
+        echo -e "${RED}Ошибка: Не удалось установить правильную версию Rust!${NC}"
+        exit 1
+    fi
 }
 
 install_risc0() {
