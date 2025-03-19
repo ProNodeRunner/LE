@@ -183,9 +183,23 @@ build_services() {
 
 setup_systemd() {
     echo -e "${ORANGE}[10/10] Настройка сервисов...${NC}"
-    
-    # Конфигурация Merkle Service
-    echo -e "${ORANGE}Создание сервиса Merkle...${NC}"
+
+    # Явные пути (решаем проблему с .env)
+    local ENV_FILE="$INSTALL_DIR/light-node/.env"
+    local NODE_BIN="$INSTALL_DIR/light-node/layeredge-node"
+
+    # Жесткая проверка .env и бинарника
+    echo -e "${ORANGE}Проверка системных файлов...${NC}"
+    for FILE in "$ENV_FILE" "$NODE_BIN"; do
+        if [ ! -f "$FILE" ]; then
+            echo -e "${RED}ФАТАЛЬНАЯ ОШИБКА: $FILE не найден!${NC}"
+            echo -e "${ORANGE}Переустановите ноду через пункт 1 меню${NC}"
+            exit 1
+        fi
+    done
+
+    # Merkle Service (с автоматическим health-check)
+    echo -e "${ORANGE}Настройка Merkle-сервиса...${NC}"
     sudo tee /etc/systemd/system/merkle.service >/dev/null <<EOL
 [Unit]
 Description=LayerEdge Merkle Service
@@ -195,17 +209,17 @@ After=network.target
 Type=exec
 User=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR/$NODE_DIR/$MERKLE_DIR
-ExecStart=$(which cargo) run --release
+ExecStart=$(which cargo) run --features="health-endpoint" --release
 Restart=on-failure
-RestartSec=10s
+RestartSec=15s
 Environment="RUST_LOG=info"
 
 [Install]
 WantedBy=multi-user.target
 EOL
 
-    # Конфигурация Node Service
-    echo -e "${ORANGE}Создание сервиса Light Node...${NC}"
+    # Node Service (фиксированный путь к .env)
+    echo -e "${ORANGE}Настройка Light Node...${NC}"
     sudo tee /etc/systemd/system/layeredge-node.service >/dev/null <<EOL
 [Unit]
 Description=LayerEdge Light Node
@@ -216,11 +230,11 @@ After=merkle.service
 Type=exec
 User=$SERVICE_USER
 WorkingDirectory=$INSTALL_DIR/$NODE_DIR
-ExecStart=$INSTALL_DIR/$NODE_DIR/layeredge-node
-EnvironmentFile=$INSTALL_DIR/$NODE_DIR/.env
+ExecStart=$NODE_BIN
+EnvironmentFile=$ENV_FILE
 Restart=on-failure
 RestartSec=30s
-TimeoutStartSec=600
+TimeoutStartSec=900
 
 # Логирование
 StandardOutput=journal
@@ -231,50 +245,57 @@ SyslogIdentifier=layeredge-node
 WantedBy=multi-user.target
 EOL
 
-    # Применение изменений
+    # Применяем изменения
     sudo systemctl daemon-reload
 
-    # Запуск сервисов с проверками
+    # Запуск с улучшенными проверками
     echo -e "${ORANGE}Запуск Merkle-сервиса...${NC}"
-    sudo systemctl enable --now merkle.service || {
-        echo -e "${RED}Ошибка запуска Merkle-сервиса!${NC}"
+    sudo systemctl restart merkle.service || {
+        echo -e "${RED}Ошибка запуска Merkle! Логи:${NC}"
         journalctl -u merkle.service -n 50 --no-pager
         exit 1
     }
 
-    echo -e "${ORANGE}Проверка доступности Merkle-сервиса...${NC}"
-    local max_retries=20
+    echo -e "${ORANGE}Ожидание инициализации ZK (40 сек)...${NC}"
+    sleep 40
+
+    echo -e "${ORANGE}Проверка работоспособности...${NC}"
+    local max_retries=25
     for ((i=1; i<=max_retries; i++)); do
-        if curl -sSf http://127.0.0.1:3001/health >/dev/null; then
-            echo -e "${GREEN}Merkle-сервис доступен!${NC}"
+        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3001/health)
+        
+        if [ "$HTTP_CODE" -eq 200 ]; then
+            echo -e "${GREEN}Merkle-сервис активен!${NC}"
             break
-        else
-            echo -e "${ORANGE}Попытка $i/$max_retries: Ожидание инициализации ZK...${NC}"
+        elif [ "$HTTP_CODE" -eq 404 ]; then
+            echo -e "${ORANGE}Попытка $i/$max_retries: Эндпоинт /health не найден!${NC}"
+            echo -e "${ORANGE}Пересобираем сервис...${NC}"
+            (cd "$INSTALL_DIR/$NODE_DIR/$MERKLE_DIR" && cargo build --features="health-endpoint" --release)
+            sudo systemctl restart merkle.service
             sleep 30
+        else
+            echo -e "${ORANGE}Попытка $i/$max_retries: Код ответа $HTTP_CODE...${NC}"
+            sleep 25
         fi
+
         if [ $i -eq $max_retries ]; then
-            echo -e "${RED}Merkle-сервис не запустился! Проверьте:${NC}"
-            echo -e "1. journalctl -u merkle.service -n 100 --no-pager"
-            echo -e "2. netstat -tulpn | grep 3001"
-            echo -e "3. curl -v http://127.0.0.1:3001/health"
+            echo -e "${RED}Критическая ошибка инициализации!${NC}"
+            echo -e "1. netstat -tulpn | grep 3001"
+            echo -e "2. journalctl -u merkle.service -n 100"
             exit 1
         fi
     done
 
+    # Запуск ноды с гарантией
     echo -e "${ORANGE}Запуск Light Node...${NC}"
-    sudo systemctl enable --now layeredge-node.service || {
-        echo -e "${RED}Ошибка запуска Light Node!${NC}"
-        journalctl -u layeredge-node.service -n 50 --no-pager
-        exit 1
-    }
+    sudo systemctl restart layeredge-node.service
 
-    # Финальная проверка
-    echo -e "${ORANGE}Проверка статуса ноды...${NC}"
-    if systemctl is-active --quiet layeredge-node.service; then
-        echo -e "${GREEN}Нода успешно запущена!${NC}"
-        echo -e "${ORANGE}Для просмотра логов используйте: journalctl -u layeredge-node.service -f${NC}"
+    echo -e "${ORANGE}Финальная проверка...${NC}"
+    sleep 15
+    if systemctl is-active layeredge-node.service; then
+        echo -e "${GREEN}Нода запущена успешно!${NC}"
     else
-        echo -e "${RED}Нода не запустилась! Последние логи:${NC}"
+        echo -e "${RED}Ошибка запуска ноды! Диагностика:${NC}"
         journalctl -u layeredge-node.service -n 50 --no-pager
         exit 1
     fi
