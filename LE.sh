@@ -121,11 +121,14 @@ EOL
 build_services() {
     echo -e "${ORANGE}[8/9] Сборка сервисов...${NC}"
     
-    # Обновление зависимостей
+    # Обновление Go зависимостей
     echo -e "${ORANGE}Обновление Go модулей...${NC}"
     cd "$INSTALL_DIR/$NODE_DIR"
-    go mod tidy -v
-    
+    go mod tidy -v || {
+        echo -e "${RED}Ошибка обновления зависимостей!${NC}"
+        exit 1
+    }
+
     # Сборка Merkle
     echo -e "${ORANGE}Сборка Merkle-сервиса...${NC}"
     cd "$MERKLE_DIR"
