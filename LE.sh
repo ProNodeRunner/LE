@@ -1,5 +1,5 @@
 #!/bin/bash
-set -euxo pipefail
+set -e
 
 LOGO_URL="https://raw.githubusercontent.com/ProNodeRunner/Logo/main/Logo"
 ORANGE='\033[0;33m'
@@ -11,56 +11,63 @@ MERKLE_DIR="risc0-merkle-service"
 INSTALL_DIR=$(pwd)
 
 show_logo() {
+    clear
     echo -e "${ORANGE}"
     curl -sSf "$LOGO_URL" 2>/dev/null || echo "=== LAYEREDGE NODE MANAGER ==="
     echo -e "${NC}"
     echo -e "${ORANGE}====================== LayerEdge Node ======================${NC}\n"
 }
 
-step1_check_deps() {
-    echo -e "${ORANGE}[1/9] Обновление системы...${NC}"
+show_menu() {
+    echo -e "${ORANGE}1. Установить ноду"
+    echo -e "2. Показать статус"
+    echo -e "3. Показать логи"
+    echo -e "4. Перезапустить сервисы"
+    echo -e "5. Удалить ноду"
+    echo -e "6. Выход${NC}"
+}
+
+install_dependencies() {
+    echo -e "${ORANGE}[1/8] Обновление системы...${NC}"
     sudo DEBIAN_FRONTEND=noninteractive apt-get update -yq
     sudo DEBIAN_FRONTEND=noninteractive apt-get upgrade -yq
 
-    echo -e "${ORANGE}[2/9] Установка базовых зависимостей...${NC}"
+    echo -e "${ORANGE}[2/8] Установка базовых зависимостей...${NC}"
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq \
         git curl build-essential libssl-dev pkg-config
 }
 
-step2_install_go() {
-    echo -e "${ORANGE}[3/9] Установка Go 1.18...${NC}"
+install_go() {
+    echo -e "${ORANGE}[3/8] Установка Go 1.18...${NC}"
     sudo add-apt-repository -y ppa:longsleep/golang-backports
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq golang-1.18
     echo 'export PATH=$PATH:/usr/lib/go-1.18/bin' | sudo tee /etc/profile.d/go.sh
     source /etc/profile.d/go.sh
-    go version || { echo -e "${RED}Ошибка установки Go!${NC}"; exit 1; }
 }
 
-step3_install_rust() {
-    echo -e "${ORANGE}[4/9] Установка Rust...${NC}"
+install_rust() {
+    echo -e "${ORANGE}[4/8] Установка Rust...${NC}"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "$HOME/.cargo/env"
     rustup default 1.81.0 -y
-    cargo --version || { echo -e "${RED}Ошибка установки Rust!${NC}"; exit 1; }
 }
 
-step4_install_risc0() {
-    echo -e "${ORANGE}[5/9] Установка Risc0...${NC}"
+install_risc0() {
+    echo -e "${ORANGE}[5/8] Установка Risc0...${NC}"
     curl -L https://risczero.com/install | bash
     source "$HOME/.cargo/env"
     export PATH="$HOME/.risc0/bin:$PATH"
     rzup install --force
-    rzup --version || { echo -e "${RED}Ошибка установки Risc0!${NC}"; exit 1; }
 }
 
-step5_clone_repo() {
-    echo -e "${ORANGE}[6/9] Клонирование репозитория...${NC}"
+clone_repo() {
+    echo -e "${ORANGE}[6/8] Клонирование репозитория...${NC}"
     [ ! -d "$NODE_DIR" ] && git clone https://github.com/Layer-Edge/light-node.git
     cd "$NODE_DIR" || exit 1
 }
 
-step6_setup_env() {
-    echo -e "${ORANGE}[7/9] Настройка окружения...${NC}"
+setup_env() {
+    echo -e "${ORANGE}[7/8] Настройка окружения...${NC}"
     read -p "${ORANGE}Введите приватный ключ кошелька: ${NC}" PRIVATE_KEY
     cat > .env <<EOL
 GRPC_URL=34.31.74.109:9090
@@ -72,16 +79,10 @@ PRIVATE_KEY='$PRIVATE_KEY'
 EOL
 }
 
-step7_build_merkle() {
-    echo -e "${ORANGE}[8/9] Сборка Merkle-сервиса...${NC}"
-    cd "$MERKLE_DIR" || exit 1
-    cargo build --release || { echo -e "${RED}Ошибка сборки Merkle!${NC}"; exit 1; }
-}
-
-step8_build_node() {
-    echo -e "${ORANGE}[9/9] Сборка Light Node...${NC}"
-    cd ..
-    go build -o layeredge-node || { echo -e "${RED}Ошибка сборки Node!${NC}"; exit 1; }
+build_services() {
+    echo -e "${ORANGE}[8/8] Сборка сервисов...${NC}"
+    cd "$MERKLE_DIR" && cargo build --release
+    cd .. && go build -o layeredge-node
 }
 
 setup_systemd() {
@@ -123,20 +124,57 @@ EOL
     sudo systemctl start merkle.service layeredge-node.service
 }
 
-main() {
-    show_logo
-    step1_check_deps
-    step2_install_go
-    step3_install_rust
-    step4_install_risc0
-    step5_clone_repo
-    step6_setup_env
-    step7_build_merkle
-    step8_build_node
-    setup_systemd
+show_status() {
+    echo -e "\n${ORANGE}=== Статус сервисов ===${NC}"
+    systemctl status merkle.service layeredge-node.service --no-pager
+}
+
+show_logs() {
+    echo -e "\n${ORANGE}=== Логи Merkle ===${NC}"
+    journalctl -u merkle.service -n 10 --no-pager
     
-    echo -e "\n${GREEN}[✓] Установка завершена!${NC}"
-    echo -e "Проверьте статус: systemctl status merkle.service layeredge-node.service"
+    echo -e "\n${ORANGE}=== Логи Node ===${NC}"
+    journalctl -u layeredge-node.service -n 10 --no-pager
+}
+
+delete_node() {
+    echo -e "${RED}Удаление ноды...${NC}"
+    sudo systemctl stop merkle.service layeredge-node.service
+    sudo systemctl disable merkle.service layeredge-node.service
+    sudo rm -f /etc/systemd/system/{merkle,layeredge-node}.service
+    sudo rm -rf "$INSTALL_DIR/$NODE_DIR"
+    echo -e "${GREEN}Нода успешно удалена!${NC}"
+}
+
+install_node() {
+    install_dependencies
+    install_go
+    install_rust
+    install_risc0
+    clone_repo
+    setup_env
+    build_services
+    setup_systemd
+}
+
+main() {
+    while true; do
+        show_logo
+        show_menu
+        read -p "Выберите действие: " choice
+
+        case $choice in
+            1) install_node ;;
+            2) show_status ;;
+            3) show_logs ;;
+            4) sudo systemctl restart merkle.service layeredge-node.service ;;
+            5) delete_node ;;
+            6) exit 0 ;;
+            *) echo -e "${RED}Неверный выбор!${NC}" ;;
+        esac
+
+        read -p $'\nНажмите Enter чтобы продолжить...'
+    done
 }
 
 main
