@@ -38,11 +38,31 @@ install_dependencies() {
 }
 
 install_go() {
-    echo -e "${ORANGE}[3/8] Установка Go 1.18...${NC}"
-    sudo add-apt-repository -y ppa:longsleep/golang-backports
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq golang-1.18
-    echo 'export PATH=$PATH:/usr/lib/go-1.18/bin' | sudo tee /etc/profile.d/go.sh
-    source /etc/profile.d/go.sh
+    echo -e "${ORANGE}[3/8] Установка Go 1.23...${NC}"
+    
+    # Удаление старых версий
+    sudo rm -rf /usr/local/go
+    sudo rm -rf /usr/lib/go-*
+
+    # Скачивание и установка нужной версии
+    GO_VERSION="1.23.1"
+    ARCH="linux-amd64"
+    curl -OL https://go.dev/dl/go${GO_VERSION}.${ARCH}.tar.gz
+    sudo tar -C /usr/local -xzf go${GO_VERSION}.${ARCH}.tar.gz
+    rm go${GO_VERSION}.${ARCH}.tar.gz
+
+    # Настройка PATH
+    echo 'export PATH=$PATH:/usr/local/go/bin' | sudo tee /etc/profile.d/go_custom.sh
+    source /etc/profile.d/go_custom.sh
+
+    # Исправление go.mod
+    sed -i 's/^go 1\.23\.[0-9]*/go 1.23/' $NODE_DIR/go.mod
+
+    # Проверка установки
+    if ! go version | grep -q "go$GO_VERSION"; then
+        echo -e "${RED}Ошибка установки Go!${NC}"
+        exit 1
+    fi
 }
 
 install_rust() {
